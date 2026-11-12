@@ -2,6 +2,16 @@
 
 Eine App mit Tweaks, Bloatware-Entfernung, DNS-Benchmark, Speicher-Analyse und Systemcheck.
 
+| Tab | Was er macht |
+|---|---|
+| Übersicht | PULS-Score, Auslastung, Systeminfo, Ressourcenfresser |
+| Tweaks | Leistung & Gaming (Game DVR, GPU-Planung, Drosselung, Ruhezustand …), Bedienung (Maus, Menüs, Einrastfunktion) |
+| Windows aufräumen | Werbung, Copilot/Recall, Telemetrie (Dienste + Aufgaben), unnötige Dienste, Altlasten (IE-Modus, WordPad, SMB1, PowerShell 2 …), OneDrive – mit „Alles Empfohlene entfernen“-Knopf |
+| Bloatware | Vorinstallierte Apps (News, Clipchamp, Candy Crush …) entfernen |
+| DNS | Schnellsten DNS messen und sicher umstellen |
+| Speicherplatz | Paralleler Ordner-Scan zum Durchklicken |
+| Analyse | Laufwerks-Gesundheit, Bootzeiten, Fremddienste |
+
 ## Starten
 
 PowerShell **als Administrator** öffnen und eingeben:

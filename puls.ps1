@@ -110,7 +110,7 @@ function Log([string]$m, [string]$art = 'info') {
 }
 function Set-Busy([bool]$b) {
     $script:Busy = $b
-    foreach ($n in 'BtnTweakAn', 'BtnTweakAus', 'BtnBloatEntfernen', 'BtnDnsReset') { $ui[$n].IsEnabled = -not $b }
+    foreach ($n in 'BtnTweakAn', 'BtnTweakAus', 'BtnWinAlles', 'BtnWinAn', 'BtnWinAus', 'BtnBloatEntfernen', 'BtnDnsReset') { $ui[$n].IsEnabled = -not $b }
 }
 function Start-Bg([scriptblock]$Arbeit, [object[]]$Argumente, [scriptblock]$Fertig) {
     $ps = [powershell]::Create()
@@ -181,11 +181,30 @@ function Speichere-Backup($h) {
 $cdm = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 $games = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games'
-$kL = 'Leistung & Gaming'; $kB = 'Bedienung'; $kW = 'Windows-Bloat & Datenschutz'
+$kL = 'Leistung & Gaming'; $kB = 'Bedienung'
+$w1 = 'Werbung & Vorschläge'; $w2 = 'KI & Copilot'; $w3 = 'Datenschutz & Telemetrie'; $w4 = 'Hintergrund & Dienste'; $w5 = 'Windows-Komponenten & OneDrive'
+$script:LangsamStatus = @{}
+
+# Optionale Windows-Funktion ("Capability") entfernen - laeuft im Hintergrund, weil DISM langsam ist
+function Cap($id, $name, $cap, $warum, $empf) {
+    @{ Id = $id; Kat = $w5; Name = $name; Wirkt = 'sofort'; Empf = $empf; Langsam = $true
+       Warum = "$warum Zurückholen: Einstellungen > System > Optionale Features (braucht Internet)."
+       Ist = [scriptblock]::Create("`$c = @(Get-WindowsCapability -Online -Name '$cap' -ErrorAction Stop); -not (`$c | Where-Object { `$_.State -eq 'Installed' })")
+       An = [scriptblock]::Create("Get-WindowsCapability -Online -Name '$cap' -ErrorAction Stop | Where-Object { `$_.State -eq 'Installed' } | Remove-WindowsCapability -Online -ErrorAction Stop | Out-Null")
+       Aus = [scriptblock]::Create("Get-WindowsCapability -Online -Name '$cap' -ErrorAction Stop | Add-WindowsCapability -Online -ErrorAction Stop | Out-Null") }
+}
+# Windows-Feature ("Windows-Features aktivieren oder deaktivieren") abschalten
+function Feat($id, $name, $feat, $warum, $empf) {
+    @{ Id = $id; Kat = $w5; Name = $name; Wirkt = 'nach Neustart'; Empf = $empf; Langsam = $true; Warum = $warum
+       Ist = [scriptblock]::Create("`$f = @(Get-WindowsOptionalFeature -Online -FeatureName '$feat' -ErrorAction SilentlyContinue); -not (`$f | Where-Object { `$_.State -match '^Enable' })")
+       An = [scriptblock]::Create("Disable-WindowsOptionalFeature -Online -FeatureName '$feat' -NoRestart -ErrorAction Stop | Out-Null")
+       Aus = [scriptblock]::Create("Enable-WindowsOptionalFeature -Online -FeatureName '$feat' -All -NoRestart -ErrorAction Stop | Out-Null") }
+}
 $script:Tweaks = @(
     @{ Id = 'gamedvr'; Kat = $kL; Name = 'Xbox-Hintergrundaufnahme aus'; Wirkt = 'beim nächsten Spielstart'; Empf = $true
-       Warum = 'Game DVR zeichnet sonst ständig im Hintergrund mit - kostet FPS und macht Frametime-Spikes.'
-       Reg = @((RW 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' 0), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' 'AppCaptureEnabled' 0)) },
+       Warum = 'Game DVR zeichnet sonst ständig im Hintergrund mit - kostet FPS und macht Frametime-Spikes. Auch das Game-Bar-Popup beim Xbox-Knopf am Controller fällt weg.'
+       Reg = @((RW 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' 0), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' 'AppCaptureEnabled' 0),
+               (RW 'HKCU:\Software\Microsoft\GameBar' 'UseNexusForGameBarEnabled' 0)) },
     @{ Id = 'hags'; Kat = $kL; Name = 'Hardware-GPU-Planung an'; Wirkt = 'nach Neustart'; Empf = $true
        Warum = 'Die GPU verwaltet ihren Speicher selbst: weniger CPU-Last und Latenz. Pflicht für DLSS Frame Generation.'
        Reg = @((RW 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' 2)) },
@@ -212,108 +231,227 @@ $script:Tweaks = @(
     @{ Id = 'menue'; Kat = $kB; Name = 'Menü-Verzögerung weg'; Wirkt = 'nach Abmelden'; Empf = $true
        Warum = 'Untermenüs öffnen sofort statt nach einer eingebauten 400-ms-Pause.'
        Reg = @((RW 'HKCU:\Control Panel\Desktop' 'MenuShowDelay' '0' 'String')) },
+    @{ Id = 'sticky'; Kat = $kB; Name = 'Einrastfunktion-Popups aus'; Wirkt = 'nach Abmelden'; Empf = $true
+       Warum = 'Kein "Einrastfunktion aktivieren?"-Fenster mehr, wenn du im Spiel 5x Shift drückst (auch Filter-/Umschalttasten).'
+       Reg = @((RW 'HKCU:\Control Panel\Accessibility\StickyKeys' 'Flags' '506' 'String'), (RW 'HKCU:\Control Panel\Accessibility\ToggleKeys' 'Flags' '58' 'String'),
+               (RW 'HKCU:\Control Panel\Accessibility\Keyboard Response' 'Flags' '122' 'String')) }
+)
 
-    @{ Id = 'werbung'; Kat = $kW; Name = 'Windows-Werbung & Vorschläge aus'; Wirkt = 'sofort'; Empf = $true
+$script:WinItems = @(
+    @{ Id = 'werbung'; Kat = $w1; Name = 'Windows-Werbung & Vorschläge aus'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Keine App-Vorschläge und "Empfohlen"-Werbung im Startmenü, keine Tipps-Popups, keine Sperrbildschirm-Werbung, keine still nachinstallierten Apps.'
        Reg = @((RW $cdm 'SubscribedContent-338388Enabled' 0), (RW $cdm 'SubscribedContent-338389Enabled' 0), (RW $cdm 'SubscribedContent-353694Enabled' 0),
                (RW $cdm 'SubscribedContent-353696Enabled' 0), (RW $cdm 'SubscribedContent-338387Enabled' 0), (RW $cdm 'RotatingLockScreenOverlayEnabled' 0),
                (RW $cdm 'SystemPaneSuggestionsEnabled' 0), (RW $cdm 'SilentInstalledAppsEnabled' 0), (RW $cdm 'SoftLandingEnabled' 0),
                (RW $adv 'ShowSyncProviderNotifications' 0), (RW $adv 'Start_IrisRecommendations' 0)) },
-    @{ Id = 'websuche'; Kat = $kW; Name = 'Bing-Websuche im Startmenü aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
-       Warum = 'Startmenü sucht nur noch lokal: schneller, ohne Bing-Treffer.'
-       Reg = @((RW 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions' 1), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'BingSearchEnabled' 0)) },
-    @{ Id = 'widgets'; Kat = $kW; Name = 'Widgets / News-Feed aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
+    @{ Id = 'websuche'; Kat = $w1; Name = 'Bing-Websuche & Suchhighlights aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
+       Warum = 'Startmenü sucht nur noch lokal: schneller, ohne Bing-Treffer und ohne die bunten "Highlights des Tages" im Suchfeld.'
+       Reg = @((RW 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions' 1), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'BingSearchEnabled' 0),
+               (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' 'IsDynamicSearchBoxEnabled' 0)) },
+    @{ Id = 'widgets'; Kat = $w1; Name = 'Widgets / News-Feed aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
        Warum = 'Entfernt das Wetter-/News-Panel aus der Taskleiste samt seinen Hintergrundprozessen (WebView).'
        Reg = @((RW 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0)) },
-    @{ Id = 'copilot'; Kat = $kW; Name = 'Copilot aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
+    @{ Id = 'copilot'; Kat = $w2; Name = 'Copilot aus'; Wirkt = 'nach Explorer-Neustart'; Empf = $true
        Warum = 'Schaltet Windows Copilot und den Taskleisten-Knopf ab. Die Copilot-App selbst entfernst du unter "Bloatware".'
        Reg = @((RW 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1), (RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1),
                (RW $adv 'ShowCopilotButton' 0)) },
-    @{ Id = 'recall'; Kat = $kW; Name = 'Recall / KI-Bildschirmfotos aus'; Wirkt = 'sofort'; Empf = $true
-       Warum = 'Verhindert, dass Windows laufend Screenshots deines Bildschirms speichert und auswertet (Copilot+-PCs).'
+    @{ Id = 'recall'; Kat = $w2; Name = 'Recall & "Click to Do" aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Verhindert, dass Windows laufend Screenshots deines Bildschirms speichert und per KI auswertet (Copilot+-PCs).'
        Reg = @((RW 'HKCU:\Software\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1), (RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1),
+               (RW 'HKCU:\Software\Policies\Microsoft\Windows\WindowsAI' 'DisableClickToDo' 1),
                (RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'AllowRecallEnablement' 0)) },
-    @{ Id = 'hintergrund'; Kat = $kW; Name = 'Hintergrund-Apps aus'; Wirkt = 'sofort'; Empf = $true
+    @{ Id = 'hintergrund'; Kat = $w4; Name = 'Hintergrund-Apps aus'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Store-Apps (Wetter, Fotos, Xbox ...) laufen nicht mehr unsichtbar weiter. Normale Programme sind nicht betroffen.'
        Reg = @((RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' 1), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'BackgroundAppGlobalToggle' 0)) },
-    @{ Id = 'telemetrie'; Kat = $kW; Name = 'Hintergrund-Uploads (Telemetrie-Dienst) aus'; Wirkt = 'sofort'; Empf = $true
-       Warum = 'Stoppt den Dienst "Benutzererfahrung und Telemetrie" (DiagTrack): keine Hintergrund-Uploads und Datenträgerlast mehr.'
-       Ist = { (Get-Service DiagTrack -ErrorAction Stop).StartType -eq 'Disabled' }
-       An = { Stop-Service DiagTrack -Force -ErrorAction Stop; Set-Service DiagTrack -StartupType Disabled -ErrorAction Stop }
-       Aus = { Set-Service DiagTrack -StartupType Automatic -ErrorAction Stop; Start-Service DiagTrack -ErrorAction SilentlyContinue } },
-    @{ Id = 'diagdaten'; Kat = $kW; Name = 'Diagnosedaten auf Minimum'; Wirkt = 'sofort'; Empf = $true
+    @{ Id = 'telemetrie'; Kat = $w3; Name = 'Hintergrund-Uploads (Telemetrie-Dienste) aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Stoppt "Benutzererfahrung und Telemetrie" (DiagTrack) und den WAP-Push-Dienst: keine Hintergrund-Uploads und Datenträgerlast mehr.'
+       Dienste = @('DiagTrack', 'dmwappushservice') },
+    @{ Id = 'diagdaten'; Kat = $w3; Name = 'Diagnosedaten auf Minimum'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Windows schickt nur noch die Pflicht-Diagnosedaten statt der optionalen (Nutzung, Apps, Browser).'
        Reg = @((RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 0)) },
-    @{ Id = 'werbeid'; Kat = $kW; Name = 'Werbe-ID & personalisierte Tipps aus'; Wirkt = 'sofort'; Empf = $true
+    @{ Id = 'werbeid'; Kat = $w3; Name = 'Werbe-ID & personalisierte Tipps aus'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Apps bekommen keine Werbe-ID mehr, Microsoft nutzt deine Diagnosedaten nicht für "maßgeschneiderte" Werbung.'
        Reg = @((RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 0), (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy' 'TailoredExperiencesWithDiagnosticDataEnabled' 0)) },
-    @{ Id = 'aktivitaet'; Kat = $kW; Name = 'Aktivitätsverlauf aus'; Wirkt = 'sofort'; Empf = $true
+    @{ Id = 'aktivitaet'; Kat = $w3; Name = 'Aktivitätsverlauf aus'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Windows protokolliert nicht mehr, welche Programme und Dateien du wann geöffnet hast.'
        Reg = @((RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableActivityFeed' 0), (RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities' 0),
                (RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'UploadUserActivities' 0)) },
-    @{ Id = 'feedback'; Kat = $kW; Name = 'Feedback-Anfragen aus'; Wirkt = 'sofort'; Empf = $true
+    @{ Id = 'feedback'; Kat = $w3; Name = 'Feedback-Anfragen aus'; Wirkt = 'sofort'; Empf = $true
        Warum = 'Keine "Wie gefällt dir Windows?"-Popups mehr.'
-       Reg = @((RW 'HKCU:\Software\Microsoft\Siuf\Rules' 'NumberOfSIUFInPeriod' 0)) }
+       Reg = @((RW 'HKCU:\Software\Microsoft\Siuf\Rules' 'NumberOfSIUFInPeriod' 0)) },
+
+    @{ Id = 'vorschlaege'; Kat = $w1; Name = 'Werbung in Einstellungen & "Einrichtung abschließen" aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Keine Werbe-Kacheln in den Einstellungen und kein "Lass uns die Einrichtung deines Geräts abschließen"-Bildschirm nach Updates.'
+       Reg = @((RW $cdm 'SubscribedContent-338393Enabled' 0), (RW $cdm 'SubscribedContent-353698Enabled' 0),
+               (RW 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' 'ScoobeSystemSettingEnabled' 0)) },
+    @{ Id = 'taskleiste'; Kat = $w1; Name = 'Taskleiste aufräumen (Chat & Aufgabenansicht)'; Wirkt = 'nach Explorer-Neustart'; Empf = $false
+       Warum = 'Blendet den Chat-/Teams-Knopf und den Aufgabenansicht-Knopf aus. Win+Tab funktioniert weiterhin.'
+       Reg = @((RW $adv 'TaskbarMn' 0), (RW $adv 'ShowTaskViewButton' 0)) },
+    @{ Id = 'cortana'; Kat = $w2; Name = 'Cortana sperren'; Wirkt = 'nach Neustart'; Empf = $true
+       Warum = 'Sperrt Cortana per Richtlinie. Die App selbst entfernst du unter "Bloatware".'
+       Reg = @((RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' 'AllowCortana' 0)) },
+    @{ Id = 'teleaufgaben'; Kat = $w3; Name = 'Telemetrie-Aufgaben aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Deaktiviert geplante Aufgaben, die regelmäßig Kompatibilitäts-, Nutzungs- und Datenträgerdaten sammeln und hochladen - z. B. den "Compatibility Appraiser", der nach dem Start oft CPU frisst.'
+       Aufgaben = @('\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser', '\Microsoft\Windows\Application Experience\ProgramDataUpdater',
+                    '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator', '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
+                    '\Microsoft\Windows\Autochk\Proxy', '\Microsoft\Windows\Feedback\Siuf\DmClient', '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload',
+                    '\Microsoft\Windows\Windows Error Reporting\QueueReporting', '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector') },
+    @{ Id = 'eingabe'; Kat = $w3; Name = 'Tipp- & Freihand-Daten nicht sammeln'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Windows lernt nicht mehr aus allem, was du tippst und schreibst, und schickt es nicht für "Verbesserungen" an Microsoft.'
+       Reg = @((RW 'HKCU:\Software\Microsoft\InputPersonalization' 'RestrictImplicitInkCollection' 1), (RW 'HKCU:\Software\Microsoft\InputPersonalization' 'RestrictImplicitTextCollection' 1),
+               (RW 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore' 'HarvestContacts' 0), (RW 'HKCU:\Software\Microsoft\Personalization\Settings' 'AcceptedPrivacyPolicy' 0),
+               (RW 'HKCU:\Software\Microsoft\Input\TIPC' 'Enabled' 0)) },
+    @{ Id = 'fehlerberichte'; Kat = $w3; Name = 'Fehlerberichte an Microsoft aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Abstürze werden nicht mehr gesammelt und hochgeladen (Richtlinie + Dienst WerSvc).'
+       Reg = @((RW 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting' 'Disabled' 1)); Dienste = @('WerSvc') },
+    @{ Id = 'apptracking'; Kat = $w3; Name = 'App-Start-Verfolgung aus'; Wirkt = 'nach Abmelden'; Empf = $false
+       Warum = 'Windows merkt sich nicht mehr, welche Programme du startest. Dafür fällt die Liste "Meistverwendet" im Startmenü weg.'
+       Reg = @((RW $adv 'Start_TrackProgs' 0)) },
+    @{ Id = 'p2p'; Kat = $w4; Name = 'Update-Verteilung an fremde PCs aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Dein PC lädt keine Windows-Updates mehr für andere PCs im Internet hoch - spart Upload-Bandbreite, was beim Zocken Ping-Spitzen verhindern kann.'
+       Reg = @((RW 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' 'DODownloadMode' 0)) },
+    @{ Id = 'karten'; Kat = $w4; Name = 'Offline-Karten-Dienst aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Keine automatischen Kartendownloads im Hintergrund (Dienst MapsBroker).'
+       Reg = @((RW 'HKLM:\SYSTEM\Maps' 'AutoUpdateEnabled' 0)); Dienste = @('MapsBroker') },
+    @{ Id = 'dienste'; Kat = $w4; Name = 'Unnötige Windows-Dienste aus'; Wirkt = 'sofort'; Empf = $true
+       Warum = 'Fax, Einzelhandels-Demo, Jugendschutz-Überwachung, Windows-Insider, Remote-Registrierung, Mediaplayer-Netzwerkfreigabe und Verknüpfungsverfolgung - braucht ein privater PC nicht.'
+       Dienste = @('Fax', 'RetailDemo', 'WpcMonSvc', 'wisvc', 'RemoteRegistry', 'WMPNetworkSvc', 'TrkWks') },
+    @{ Id = 'xbox'; Kat = $w4; Name = 'Xbox-Dienste aus'; Wirkt = 'sofort'; Empf = $false
+       Warum = 'Nur wenn du keine Xbox-App oder Game-Pass-Spiele nutzt. Controller funktionieren weiter, nur das Xbox-Zubehör-Tool (Firmware-Updates) nicht.'
+       Dienste = @('XblAuthManager', 'XblGameSave', 'XboxNetApiSvc', 'XboxGipSvc') },
+
+    (Cap 'iemodus' 'Internet-Explorer-Modus entfernen' 'Browser.InternetExplorer*' 'Uralter IE-Kern, nur für alte Firmen-Intranets nötig.' $true),
+    (Cap 'schritte' 'Schrittaufzeichnung entfernen' 'App.StepsRecorder*' 'Altes Aufnahme-Tool, von Microsoft bereits abgekündigt.' $true),
+    (Cap 'mathe' 'Mathe-Eingabebereich entfernen' 'MathRecognizer*' 'Handschrift-Formel-Erkennung, die kaum jemand kennt.' $true),
+    (Cap 'wordpad' 'WordPad entfernen' 'Microsoft.Windows.WordPad*' 'Von Microsoft eingestellt, Editor bzw. Word ersetzen es.' $true),
+    (Cap 'faxscan' 'Windows Fax und Scan entfernen' 'Print.Fax.Scan*' 'Fax-Programm aus den 2000ern. Scannen geht weiter über die Scanner-Software oder die Scan-App.' $true),
+    (Cap 'wmp' 'Alten Windows Media Player entfernen' 'Media.WindowsMediaPlayer*' 'Der klassische WMP. Der neue "Medienwiedergabe"-Player bleibt.' $false),
+    (Feat 'smb1' 'SMB1 abschalten (unsicheres Netzwerkprotokoll)' 'SMB1Protocol' 'Darüber hat sich WannaCry verbreitet. Nur sehr alte NAS/Router-Freigaben brauchen es noch.' $true),
+    (Feat 'ps2' 'PowerShell 2.0 abschalten' 'MicrosoftWindowsPowerShellV2Root' 'Veraltet und von Angreifern genutzt, um die Sicherheitsprotokollierung zu umgehen. Normales PowerShell bleibt.' $true),
+    (Feat 'xps' 'XPS-Dienste abschalten' 'Printing-XPSServices-Features' 'Microsofts gescheitertes PDF-Gegenstück. "Drucken als PDF" bleibt.' $true),
+    (Feat 'arbeitsordner' 'Arbeitsordner-Client abschalten' 'WorkFolders-Client' 'Firmen-Dateisynchronisation, privat nutzlos.' $true),
+    @{ Id = 'onedrive'; Kat = $w5; Name = 'OneDrive deinstallieren'; Wirkt = 'sofort'; Empf = $false; Langsam = $true
+       Warum = 'Nur wenn du OneDrive nicht nutzt. Deine Dateien in der Cloud bleiben erhalten, lokale Kopien bleiben im OneDrive-Ordner liegen.'
+       Ist = { -not (Test-Path "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe") -and -not (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe") }
+       An = {
+           Stop-Process -Name OneDrive -Force -ErrorAction SilentlyContinue
+           $kandidaten = @("$env:SystemRoot\System32\OneDriveSetup.exe", "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") +
+                         @(Get-ChildItem "$env:LOCALAPPDATA\Microsoft\OneDrive\*\OneDriveSetup.exe", "$env:ProgramFiles\Microsoft OneDrive\*\OneDriveSetup.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+           $setup = $kandidaten | Where-Object { Test-Path $_ } | Select-Object -First 1
+           if (-not $setup) { throw 'OneDrive-Deinstallationsprogramm nicht gefunden.' }
+           $argumente = '/uninstall'; if (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe") { $argumente = '/uninstall /allusers' }
+           Start-Process $setup -ArgumentList $argumente -Wait
+       }
+       Aus = {
+           $setup = @("$env:SystemRoot\System32\OneDriveSetup.exe", "$env:SystemRoot\SysWOW64\OneDriveSetup.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+           if (-not $setup) { throw 'Kein Installer an Bord - OneDrive bitte von onedrive.com neu installieren.' }
+           Start-Process $setup -Wait
+       } }
 )
 
+function Aufgabe-Holen([string]$voll) {
+    $i = $voll.LastIndexOf('\')
+    Get-ScheduledTask -TaskPath $voll.Substring(0, $i + 1) -TaskName $voll.Substring($i + 1) -ErrorAction SilentlyContinue
+}
 function Tweak-Ist($t) {
-    if ($t.Ist) { try { return [bool](& $t.Ist) } catch { return $false } }
+    if ($t.Langsam) { if ($script:LangsamStatus.ContainsKey($t.Id)) { return [bool]$script:LangsamStatus[$t.Id] }; return $null }
+    if ($t.Ist) { try { if (-not [bool](& $t.Ist)) { return $false } } catch { return $false } }
     foreach ($r in $t.Reg) {
         $a = Reg-Lesen $r.P $r.N
         if ($null -eq $a -or [string]$a.Wert -ne [string]$r.V) { return $false }
     }
+    foreach ($n in $t.Dienste) { $s = Get-Service -Name $n -ErrorAction SilentlyContinue; if ($s -and [string]$s.StartType -ne 'Disabled') { return $false } }
+    foreach ($a in $t.Aufgaben) { $k = Aufgabe-Holen $a; if ($k -and [string]$k.State -ne 'Disabled') { return $false } }
     $true
 }
 function Tweak-VonUns($t, $bk) {
-    if (-not $t.Reg) { return $bk.ContainsKey("befehl|$($t.Id)") }
+    if ($bk.ContainsKey("befehl|$($t.Id)")) { return $true }
     foreach ($r in $t.Reg) { if ($bk.ContainsKey("$($r.P)|$($r.N)")) { return $true } }
+    foreach ($n in $t.Dienste) { if ($bk.ContainsKey("dienst|$n")) { return $true } }
+    foreach ($a in $t.Aufgaben) { if ($bk.ContainsKey("aufgabe|$a")) { return $true } }
     $false
 }
+# Setzt Registry-Werte, Dienste, geplante Aufgaben und schnelle Befehle eines Eintrags.
+# Vorher wird jeder Originalzustand in tweaks-backup.json gesichert.
 function Tweak-Setzen($t, [bool]$an, $bk) {
     try {
-        if ($t.Reg) {
-            if ($an) {
-                foreach ($r in $t.Reg) {
-                    $key = "$($r.P)|$($r.N)"
-                    if ($bk.ContainsKey($key)) { continue }
-                    $alt = Reg-Lesen $r.P $r.N
-                    $e = [pscustomobject]@{ Key = $key; P = $r.P; N = $r.N; Da = ($null -ne $alt); Wert = $null; Typ = $null }
-                    if ($alt) { $e.Wert = $alt.Wert; $e.Typ = $alt.Typ }
-                    $bk[$key] = $e
-                }
-                Speichere-Backup $bk   # erst sichern, dann aendern
-                foreach ($r in $t.Reg) {
-                    if (-not (Test-Path -Path $r.P)) { New-Item -Path $r.P -Force -ErrorAction Stop | Out-Null }
-                    Set-ItemProperty -Path $r.P -Name $r.N -Value $r.V -Type $r.T -ErrorAction Stop
-                }
-            } else {
-                $hatte = $false
-                foreach ($r in $t.Reg) {
-                    $key = "$($r.P)|$($r.N)"
-                    if (-not $bk.ContainsKey($key)) { continue }
-                    $b = $bk[$key]
-                    if ($b.Da) { Set-ItemProperty -Path $b.P -Name $b.N -Value $b.Wert -Type $b.Typ -ErrorAction Stop }
-                    else { Remove-ItemProperty -Path $b.P -Name $b.N -ErrorAction SilentlyContinue }
-                    $bk.Remove($key); $hatte = $true
-                }
-                Speichere-Backup $bk
-                if (-not $hatte) { Log "$($t.Name): war schon vor PULS so eingestellt - kein Originalwert gesichert, nichts geändert." 'warn'; return }
+        if ($an) {
+            foreach ($r in $t.Reg) {
+                $key = "$($r.P)|$($r.N)"
+                if ($bk.ContainsKey($key)) { continue }
+                $alt = Reg-Lesen $r.P $r.N
+                $e = [pscustomobject]@{ Key = $key; P = $r.P; N = $r.N; Da = ($null -ne $alt); Wert = $null; Typ = $null }
+                if ($alt) { $e.Wert = $alt.Wert; $e.Typ = $alt.Typ }
+                $bk[$key] = $e
             }
+            foreach ($n in $t.Dienste) {
+                $s = Get-Service -Name $n -ErrorAction SilentlyContinue
+                if ($s -and -not $bk.ContainsKey("dienst|$n")) { $bk["dienst|$n"] = [pscustomobject]@{ Key = "dienst|$n"; Wert = [string]$s.StartType } }
+            }
+            foreach ($a in $t.Aufgaben) {
+                $k = Aufgabe-Holen $a
+                if ($k -and -not $bk.ContainsKey("aufgabe|$a")) { $bk["aufgabe|$a"] = [pscustomobject]@{ Key = "aufgabe|$a"; Wert = [string]$k.State } }
+            }
+            Speichere-Backup $bk   # erst sichern, dann aendern
+            foreach ($r in $t.Reg) {
+                if (-not (Test-Path -Path $r.P)) { New-Item -Path $r.P -Force -ErrorAction Stop | Out-Null }
+                Set-ItemProperty -Path $r.P -Name $r.N -Value $r.V -Type $r.T -ErrorAction Stop
+            }
+            foreach ($n in $t.Dienste) {
+                if (-not (Get-Service -Name $n -ErrorAction SilentlyContinue)) { continue }
+                try { Stop-Service -Name $n -Force -ErrorAction SilentlyContinue; Set-Service -Name $n -StartupType Disabled -ErrorAction Stop }
+                catch { Log "Dienst $n : $($_.Exception.Message)" 'warn' }
+            }
+            foreach ($a in $t.Aufgaben) {
+                $k = Aufgabe-Holen $a; if (-not $k) { continue }
+                try { $k | Disable-ScheduledTask -ErrorAction Stop | Out-Null } catch { Log "Aufgabe $($k.TaskName) : $($_.Exception.Message)" 'warn' }
+            }
+            if ($t.An) { & $t.An; $bk["befehl|$($t.Id)"] = [pscustomobject]@{ Key = "befehl|$($t.Id)" }; Speichere-Backup $bk }
         } else {
-            if ($an) { & $t.An; $bk["befehl|$($t.Id)"] = [pscustomobject]@{ Key = "befehl|$($t.Id)" } }
-            else { & $t.Aus; $bk.Remove("befehl|$($t.Id)") }
+            $hatte = $false
+            foreach ($r in $t.Reg) {
+                $key = "$($r.P)|$($r.N)"
+                if (-not $bk.ContainsKey($key)) { continue }
+                $b = $bk[$key]
+                if ($b.Da) { Set-ItemProperty -Path $b.P -Name $b.N -Value $b.Wert -Type $b.Typ -ErrorAction Stop }
+                else { Remove-ItemProperty -Path $b.P -Name $b.N -ErrorAction SilentlyContinue }
+                $bk.Remove($key); $hatte = $true
+            }
+            foreach ($n in $t.Dienste) {
+                $key = "dienst|$n"
+                if (-not $bk.ContainsKey($key)) { continue }
+                $typ = [string]$bk[$key].Wert
+                try {
+                    Set-Service -Name $n -StartupType $typ -ErrorAction Stop
+                    if ($typ -eq 'Automatic') { Start-Service -Name $n -ErrorAction SilentlyContinue }
+                } catch { Log "Dienst $n : $($_.Exception.Message)" 'warn' }
+                $bk.Remove($key); $hatte = $true
+            }
+            foreach ($a in $t.Aufgaben) {
+                $key = "aufgabe|$a"
+                if (-not $bk.ContainsKey($key)) { continue }
+                if ([string]$bk[$key].Wert -ne 'Disabled') {
+                    $k = Aufgabe-Holen $a
+                    if ($k) { try { $k | Enable-ScheduledTask -ErrorAction Stop | Out-Null } catch { Log "Aufgabe $($k.TaskName) : $($_.Exception.Message)" 'warn' } }
+                }
+                $bk.Remove($key); $hatte = $true
+            }
+            if ($t.Aus) { & $t.Aus; $bk.Remove("befehl|$($t.Id)"); $hatte = $true }
             Speichere-Backup $bk
+            if (-not $hatte) { Log "$($t.Name): war schon vor PULS so eingestellt - kein Originalwert gesichert, nichts geändert." 'warn'; return }
         }
-        $was = 'zurückgesetzt'; if ($an) { $was = 'aktiviert' }
-        Log "$($t.Name) $was (wirkt $($t.Wirkt))" 'ok'
+        $was = 'zurückgesetzt'; if ($an) { $was = 'erledigt' }
+        Log "$($t.Name): $was (wirkt $($t.Wirkt))" 'ok'
     } catch { Log "$($t.Name): $($_.Exception.Message)" 'fehler' }
 }
-function Tweaks-Bauen {
-    $l = $ui.TweakListe; $l.Children.Clear()
-    $script:TweakRows = New-Object System.Collections.ArrayList
-    foreach ($kat in @($kL, $kB, $kW)) {
-        [void]$l.Children.Add((T $kat 16 '#FFFFFF' -Fett -m '0,10,0,8'))
-        foreach ($t in ($script:Tweaks | Where-Object { $_.Kat -eq $kat })) {
+
+# ---------- Listen-Ansicht (Tweaks- und Windows-Tab) ----------
+function Liste-Bauen($items, $panel, [string[]]$kats) {
+    $panel.Children.Clear()
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($kat in $kats) {
+        [void]$panel.Children.Add((T $kat 16 '#FFFFFF' -Fett -m '0,10,0,8'))
+        foreach ($t in ($items | Where-Object { $_.Kat -eq $kat })) {
             $b = New-Object Windows.Controls.Border; $b.Background = '#1D1D23'; $b.CornerRadius = '8'; $b.Padding = '14,10'; $b.Margin = '0,0,0,6'
             $g = New-Object Windows.Controls.Grid
             foreach ($w in '*', 'Auto') { $c = New-Object Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
@@ -321,7 +459,9 @@ function Tweaks-Bauen {
             $cb = New-Object Windows.Controls.CheckBox; $cb.Content = $t.Name; $cb.FontSize = 14; $cb.Foreground = '#FFFFFF'; $cb.VerticalContentAlignment = 'Center'
             $desc = $t.Warum
             if ($t.Extra) { try { $x = & $t.Extra; if ($x) { $desc += " $x" } } catch {} }
-            $info = "Wirkt $($t.Wirkt)"; if ($t.Empf) { $info += '  ·  empfohlen' }
+            $info = "Wirkt $($t.Wirkt)"
+            if ($t.Empf) { $info += '  ·  empfohlen' }
+            if ($t.Langsam) { $info += '  ·  dauert etwas' }
             [void]$sp.Children.Add($cb)
             [void]$sp.Children.Add((T $desc 12 '#9A9AA8' -m '22,3,0,0'))
             [void]$sp.Children.Add((T $info 11 '#6A6A78' -m '22,2,0,0'))
@@ -330,16 +470,121 @@ function Tweaks-Bauen {
             [Windows.Controls.Grid]::SetColumn($pill, 1)
             [void]$g.Children.Add($sp); [void]$g.Children.Add($pill)
             $b.Child = $g
-            [void]$l.Children.Add($b)
-            [void]$script:TweakRows.Add([pscustomobject]@{ T = $t; Cb = $cb; Pill = $pill; Text = $pt })
+            [void]$panel.Children.Add($b)
+            [void]$rows.Add([pscustomobject]@{ T = $t; Cb = $cb; Pill = $pill; Text = $pt })
         }
     }
-    Tweaks-Status
+    , $rows
 }
-function Tweaks-Status {
-    foreach ($r in $script:TweakRows) {
-        if (Tweak-Ist $r.T) { $r.Pill.Background = '#00D1B2'; $r.Text.Text = 'AKTIV'; $r.Text.Foreground = '#0B0B0E' }
+function Status-Setzen($rows) {
+    foreach ($r in $rows) {
+        $i = Tweak-Ist $r.T
+        if ($null -eq $i) {
+            $r.Pill.Background = '#2A2A33'; $r.Text.Foreground = '#6A6A78'
+            $r.Text.Text = $(if ($script:IstAdmin) { 'PRÜFE ...' } else { 'NUR ADMIN' })
+        }
+        elseif ($i) { $r.Pill.Background = '#00D1B2'; $r.Text.Text = 'AKTIV'; $r.Text.Foreground = '#0B0B0E' }
         else { $r.Pill.Background = '#2A2A33'; $r.Text.Text = 'AUS'; $r.Text.Foreground = '#9A9AA8' }
+    }
+}
+function Alle-Status {
+    if ($script:TweakRows) { Status-Setzen $script:TweakRows }
+    if ($script:WinRows) { Status-Setzen $script:WinRows }
+}
+function Tweaks-Bauen { $script:TweakRows = Liste-Bauen $script:Tweaks $ui.TweakListe @($kL, $kB); Status-Setzen $script:TweakRows }
+function Win-Bauen { $script:WinRows = Liste-Bauen $script:WinItems $ui.WinListe @($w1, $w2, $w3, $w4, $w5); Status-Setzen $script:WinRows }
+
+# Status der langsamen Eintraege (DISM-Abfragen) einmal im Hintergrund pruefen
+function Langsam-Status-Laden {
+    if (-not $script:IstAdmin) { return }
+    $liste = @(@($script:Tweaks) + @($script:WinItems) | Where-Object { $_.Langsam } | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Ist = $_.Ist.ToString() } })
+    Start-Bg {
+        param($l)
+        foreach ($x in $l) {
+            $w = $false
+            try { $w = [bool](& ([scriptblock]::Create($x.Ist))) } catch {}
+            [pscustomobject]@{ Id = $x.Id; Wert = $w }
+        }
+    } @(, $liste) {
+        param($res)
+        foreach ($r in @($res)) { $script:LangsamStatus[$r.Id] = [bool]$r.Wert }
+        Alle-Status
+    }
+}
+
+# ---------- Warteschlange: schnelle Eintraege direkt, langsame im Hintergrund ----------
+function Queue-Start($eintraege, [scriptblock]$amEnde) {
+    $script:Q = New-Object System.Collections.Queue
+    foreach ($e in $eintraege) { $script:Q.Enqueue($e) }
+    $script:QEnde = $amEnde
+    Set-Busy $true
+    Queue-Weiter
+}
+function Queue-Weiter {
+    while ($script:Q.Count) {
+        $e = $script:Q.Dequeue()
+        if ($e.T.Langsam) {
+            $script:QAktuell = $e
+            $code = $e.T.Aus; if ($e.An) { $code = $e.T.An }
+            Log "$($e.T.Name) ... (läuft im Hintergrund, kann 1-2 Minuten dauern)"
+            $sb = [scriptblock]::Create("try { & { $code } | Out-Null; 'OK' } catch { 'FEHLER: ' + `$_.Exception.Message }")
+            Start-Bg $sb @() {
+                param($res)
+                $r = [string](@($res) | Select-Object -Last 1)
+                $e = $script:QAktuell
+                if ($r -eq 'OK') {
+                    $bk = Lade-Backup
+                    if ($e.An) { $bk["befehl|$($e.T.Id)"] = [pscustomobject]@{ Key = "befehl|$($e.T.Id)" } } else { $bk.Remove("befehl|$($e.T.Id)") }
+                    Speichere-Backup $bk
+                    $script:LangsamStatus[$e.T.Id] = $e.An
+                    $was = 'zurückgeholt'; if ($e.An) { $was = 'erledigt' }
+                    Log "$($e.T.Name): $was (wirkt $($e.T.Wirkt))" 'ok'
+                } else { Log "$($e.T.Name): $r" 'fehler' }
+                Queue-Weiter
+            }
+            return
+        }
+        Tweak-Setzen $e.T $e.An (Lade-Backup)
+    }
+    Set-Busy $false
+    if ($script:QEnde) { & $script:QEnde }
+}
+function Liste-Anwenden($rows, [bool]$an) {
+    if ($script:Busy) { Log 'Es läuft noch eine Aktion - kurz warten.' 'warn'; return }
+    $script:Wahl = @($rows | Where-Object { $_.Cb.IsChecked -and ((Tweak-Ist $_.T) -ne $an) })
+    if (-not $script:Wahl.Count) { Log 'Nichts zu tun - nichts ausgewählt oder schon im gewünschten Zustand.' 'warn'; return }
+    $script:WahlRows = $rows; $script:WahlAn = $an
+    $txt = 'rückgängig machen'; if ($an) { $txt = 'anwenden' }
+    Mit-Restorepunkt "$($script:Wahl.Count) Einstellung(en) $txt" {
+        Queue-Start @($script:Wahl | ForEach-Object { @{ T = $_.T; An = $script:WahlAn } }) {
+            foreach ($r in $script:WahlRows) { $r.Cb.IsChecked = $false }
+            Alle-Status
+            Log 'Fertig. Manches wirkt erst nach Abmelden/Neustart (steht beim Eintrag).' 'ok'
+        }
+    }
+}
+function Explorer-Neustart {
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 1200
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+    Log 'Explorer neu gestartet.' 'ok'
+}
+function Bloat-Entfernen-Start {
+    Set-Busy $true
+    Log "Entferne $($script:BloatMuster.Count) App(s) ..."
+    Start-Bg $bgBloat @(, $script:BloatMuster) {
+        param($res)
+        foreach ($z in @($res)) {
+            $t = ([string]$z).Split('|')
+            switch ($t[0]) {
+                'OK' { Log "Entfernt: $($t[1])" 'ok' }
+                'PROV' { Log "Kommt bei neuen Benutzerkonten nicht wieder: $($t[1])" 'ok' }
+                default { Log "Fehler bei $($t[1]): $($t[2])" 'fehler' }
+            }
+        }
+        Set-Busy $false
+        Bloat-Laden
+        Log 'Fertig.' 'ok'
     }
 }
 
@@ -867,6 +1112,7 @@ function Analyse-Start {
         <TextBlock Text="PC-Tuning" Foreground="#6A6A78" Margin="30,0,0,26"/>
         <RadioButton x:Name="NavUebersicht" Style="{StaticResource Nav}" Content="Übersicht" IsChecked="True"/>
         <RadioButton x:Name="NavTweaks" Style="{StaticResource Nav}" Content="Tweaks"/>
+        <RadioButton x:Name="NavWindows" Style="{StaticResource Nav}" Content="Windows aufräumen"/>
         <RadioButton x:Name="NavBloat" Style="{StaticResource Nav}" Content="Bloatware"/>
         <RadioButton x:Name="NavDns" Style="{StaticResource Nav}" Content="DNS"/>
         <RadioButton x:Name="NavPlatz" Style="{StaticResource Nav}" Content="Speicherplatz"/>
@@ -901,11 +1147,28 @@ function Analyse-Start {
               <Button x:Name="BtnTweakEmpf" Content="Empfohlene auswählen"/>
               <Button x:Name="BtnTweakKeine" Content="Auswahl leeren"/>
               <Button x:Name="BtnTweakAn" Content="Ausgewählte anwenden" Style="{StaticResource Akzent}"/>
+
               <Button x:Name="BtnTweakAus" Content="Ausgewählte rückgängig"/>
               <Button x:Name="BtnExplorer" Content="Explorer neu starten"/>
             </WrapPanel>
           </StackPanel>
           <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,6,0,0"><StackPanel x:Name="TweakListe" Margin="0,0,12,0"/></ScrollViewer>
+        </DockPanel>
+
+        <DockPanel x:Name="SeiteWindows" Visibility="Collapsed">
+          <StackPanel DockPanel.Dock="Top">
+            <TextBlock Text="Windows aufräumen" Style="{StaticResource H1}"/>
+            <TextBlock Text="Werbung, KI, Telemetrie, unnötige Dienste und Altlasten, die Windows mitbringt. &quot;Alles Empfohlene entfernen&quot; erledigt mit einem Klick diese Liste plus die empfohlenen Apps aus dem Bloatware-Tab. Vorher wird ein Wiederherstellungspunkt erstellt, alles außer den Apps ist hier per &quot;Rückgängig&quot; umkehrbar. Edge bleibt absichtlich drauf: Windows-Updates, Widgets und viele Programme (WebView2) hängen daran." Style="{StaticResource Sub}"/>
+            <WrapPanel>
+              <Button x:Name="BtnWinAlles" Content="Alles Empfohlene entfernen" Style="{StaticResource Akzent}"/>
+              <Button x:Name="BtnWinEmpf" Content="Empfohlene auswählen"/>
+              <Button x:Name="BtnWinKeine" Content="Auswahl leeren"/>
+              <Button x:Name="BtnWinAn" Content="Ausgewählte anwenden"/>
+              <Button x:Name="BtnWinAus" Content="Ausgewählte rückgängig"/>
+              <Button x:Name="BtnExplorer2" Content="Explorer neu starten"/>
+            </WrapPanel>
+          </StackPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,6,0,0"><StackPanel x:Name="WinListe" Margin="0,0,12,0"/></ScrollViewer>
         </DockPanel>
 
         <DockPanel x:Name="SeiteBloat" Visibility="Collapsed">
@@ -976,7 +1239,7 @@ foreach ($n in $xaml.SelectNodes('//*[@*[local-name()="Name"]]')) {
 }
 
 # ---------- Navigation ----------
-$script:Seiten = 'Uebersicht', 'Tweaks', 'Bloat', 'Dns', 'Platz', 'Analyse'
+$script:Seiten = 'Uebersicht', 'Tweaks', 'Windows', 'Bloat', 'Dns', 'Platz', 'Analyse'
 foreach ($s in $script:Seiten) {
     $ui["Nav$s"].Tag = $s
     $ui["Nav$s"].Add_Checked({
@@ -991,31 +1254,36 @@ $ui.BtnHogs.Add_Click({ Hogs-Start })
 
 $ui.BtnTweakEmpf.Add_Click({ foreach ($r in $script:TweakRows) { $r.Cb.IsChecked = ($r.T.Empf -and -not (Tweak-Ist $r.T)) } })
 $ui.BtnTweakKeine.Add_Click({ foreach ($r in $script:TweakRows) { $r.Cb.IsChecked = $false } })
-$ui.BtnTweakAn.Add_Click({
-    $script:TweakWahl = @($script:TweakRows | Where-Object { $_.Cb.IsChecked -and -not (Tweak-Ist $_.T) })
-    if (-not $script:TweakWahl.Count) { Log 'Nichts zu tun - keine Tweaks ausgewählt oder alle ausgewählten sind schon aktiv.' 'warn'; return }
-    Mit-Restorepunkt "$($script:TweakWahl.Count) Tweak(s) anwenden" {
-        $bk = Lade-Backup
-        foreach ($r in $script:TweakWahl) { Tweak-Setzen $r.T $true $bk; $r.Cb.IsChecked = $false }
-        Tweaks-Status
-        Log 'Fertig. Einige Tweaks wirken erst nach Abmelden/Neustart (steht beim Tweak).' 'ok'
+$ui.BtnTweakAn.Add_Click({ Liste-Anwenden $script:TweakRows $true })
+$ui.BtnTweakAus.Add_Click({ Liste-Anwenden $script:TweakRows $false })
+$ui.BtnExplorer.Add_Click({ Explorer-Neustart })
+
+$ui.BtnWinEmpf.Add_Click({ foreach ($r in $script:WinRows) { $r.Cb.IsChecked = ($r.T.Empf -and -not (Tweak-Ist $r.T)) } })
+$ui.BtnWinKeine.Add_Click({ foreach ($r in $script:WinRows) { $r.Cb.IsChecked = $false } })
+$ui.BtnWinAn.Add_Click({ Liste-Anwenden $script:WinRows $true })
+$ui.BtnWinAus.Add_Click({ Liste-Anwenden $script:WinRows $false })
+$ui.BtnExplorer2.Add_Click({ Explorer-Neustart })
+$ui.BtnWinAlles.Add_Click({
+    if ($script:Busy) { Log 'Es läuft noch eine Aktion - kurz warten.' 'warn'; return }
+    $script:WinWahl = @($script:WinRows | Where-Object { $_.T.Empf -and -not (Tweak-Ist $_.T) })
+    $bloat = @($script:BloatRows | Where-Object { $_.D.S })
+    if (-not $script:WinWahl.Count -and -not $bloat.Count) { Log 'Alles Empfohlene ist schon erledigt.' 'ok'; return }
+    $apps = 'keine'; if ($bloat.Count) { $apps = ($bloat | ForEach-Object { $_.D.N }) -join ', ' }
+    $text = "PULS räumt jetzt Windows auf:`n`n" +
+            "  - $($script:WinWahl.Count) Einstellungen, Dienste und Komponenten`n" +
+            "  - Apps: $apps`n`n" +
+            "Vorher wird ein Wiederherstellungspunkt erstellt. Alles außer den Apps lässt sich hier mit 'Rückgängig' zurückholen, die Apps über den Microsoft Store.`n`n" +
+            "Das kann ein paar Minuten dauern. Danach neu starten. Fortfahren?"
+    if ([Windows.MessageBox]::Show($text, 'PULS - Windows aufräumen', 'YesNo', 'Question') -ne 'Yes') { return }
+    $script:BloatMuster = @($bloat | ForEach-Object { $_.D.M })
+    Mit-Restorepunkt 'Windows aufräumen' {
+        Queue-Start @($script:WinWahl | ForEach-Object { @{ T = $_.T; An = $true } }) {
+            foreach ($r in $script:WinRows) { $r.Cb.IsChecked = $false }
+            Alle-Status
+            if ($script:BloatMuster.Count) { Bloat-Entfernen-Start }
+            else { Log 'Windows aufgeräumt. Bitte neu starten, damit alles greift.' 'ok' }
+        }
     }
-})
-$ui.BtnTweakAus.Add_Click({
-    $bk = Lade-Backup
-    $script:TweakWahl = @($script:TweakRows | Where-Object { $_.Cb.IsChecked -and (Tweak-Ist $_.T) })
-    if (-not $script:TweakWahl.Count) { Log 'Nichts zu tun - keine aktiven Tweaks ausgewählt.' 'warn'; return }
-    Mit-Restorepunkt "$($script:TweakWahl.Count) Tweak(s) rückgängig" {
-        $bk = Lade-Backup
-        foreach ($r in $script:TweakWahl) { Tweak-Setzen $r.T $false $bk; $r.Cb.IsChecked = $false }
-        Tweaks-Status
-    }
-})
-$ui.BtnExplorer.Add_Click({
-    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 1200
-    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
-    Log 'Explorer neu gestartet.' 'ok'
 })
 
 $ui.BtnBloatAlle.Add_Click({ foreach ($r in $script:BloatRows) { $r.Cb.IsChecked = $true } })
@@ -1029,23 +1297,7 @@ $ui.BtnBloatEntfernen.Add_Click({
     $a = [Windows.MessageBox]::Show("Diese Apps werden für alle Benutzer entfernt:`n`n$liste`n`nZurückholen geht über den Microsoft Store. Fortfahren?", 'PULS', 'YesNo', 'Question')
     if ($a -ne 'Yes') { return }
     $script:BloatMuster = @($wahl | ForEach-Object { $_.D.M })
-    Mit-Restorepunkt 'Bloatware entfernen' {
-        Set-Busy $true
-        Log "Entferne $($script:BloatMuster.Count) App(s) ..."
-        Start-Bg $bgBloat @(, $script:BloatMuster) {
-            param($res)
-            foreach ($z in @($res)) {
-                $t = ([string]$z).Split('|')
-                switch ($t[0]) {
-                    'OK' { Log "Entfernt: $($t[1])" 'ok' }
-                    'PROV' { Log "Kommt bei neuen Benutzerkonten nicht wieder: $($t[1])" 'ok' }
-                    default { Log "Fehler bei $($t[1]): $($t[2])" 'fehler' }
-                }
-            }
-            Set-Busy $false
-            Bloat-Laden
-        }
-    }
+    Mit-Restorepunkt 'Bloatware entfernen' { Bloat-Entfernen-Start }
 })
 
 $ui.BtnDnsTest.Add_Click({ Dns-Test })
@@ -1085,7 +1337,7 @@ $fenster.Add_ContentRendered({
     $ui.AdminInfo.Text = 'Backups: ' + $script:Ablage
     Log 'PULS gestartet.'
     if (-not $script:IstAdmin) { Log 'Ohne Adminrechte gestartet - Tweaks, Bloatware und DNS sind gesperrt.' 'warn' }
-    foreach ($f in 'Uebersicht-Laden', 'Tweaks-Bauen', 'Bloat-Laden', 'Dns-Anzeigen') {
+    foreach ($f in 'Uebersicht-Laden', 'Tweaks-Bauen', 'Win-Bauen', 'Bloat-Laden', 'Dns-Anzeigen', 'Langsam-Status-Laden') {
         try { & $f } catch { Log "$f : $($_.Exception.Message)" 'fehler' }
     }
     if (-not $script:IstAdmin) { Set-Busy $true }
